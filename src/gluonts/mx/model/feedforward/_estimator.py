@@ -30,7 +30,6 @@ from gluonts.mx.distribution import DistributionOutput, StudentTOutput
 from gluonts.mx.model.estimator import GluonEstimator
 from gluonts.mx.model.predictor import RepresentableBlockPredictor
 from gluonts.mx.trainer import Trainer
-from gluonts.mx.util import get_hybrid_forward_input_names
 from gluonts.transform import (
     AddObservedValuesIndicator,
     ExpectedNumInstanceSampler,
@@ -131,6 +130,7 @@ class FeedForwardEstimator(GluonEstimator):
         train_sampler: Optional[InstanceSampler] = None,
         validation_sampler: Optional[InstanceSampler] = None,
         batch_size: int = 32,
+        num_feat_dynamic_real: int = 0,
     ) -> None:
         """
         Defines an estimator.
@@ -151,6 +151,9 @@ class FeedForwardEstimator(GluonEstimator):
         assert (
             num_parallel_samples > 0
         ), "The value of `num_parallel_samples` should be > 0"
+        assert (
+            num_feat_dynamic_real >= 0
+        ), "The value of `num_feat_dynamic_real` should be >= 0"
 
         self.num_hidden_dimensions = (
             num_hidden_dimensions
@@ -183,6 +186,36 @@ class FeedForwardEstimator(GluonEstimator):
             if validation_sampler is not None
             else ValidationSplitSampler(min_future=prediction_length)
         )
+        self.num_feat_dynamic_real = num_feat_dynamic_real
+
+    def _instance_splitter_time_series_fields(self):
+        """Fields the splitter must window; omit unused optional covariates."""
+        fields = [FieldName.OBSERVED_VALUES]
+        if self.num_feat_dynamic_real > 0:
+            fields.append(FieldName.FEAT_DYNAMIC_REAL)
+        return fields
+
+    def _training_input_names(self):
+        names = [
+            "past_target",
+            "future_target",
+            "future_observed_values",
+        ]
+        if self.num_feat_dynamic_real > 0:
+            names += [
+                "past_feat_dynamic_real",
+                "future_feat_dynamic_real",
+            ]
+        return names
+
+    def _prediction_input_names(self):
+        names = ["past_target"]
+        if self.num_feat_dynamic_real > 0:
+            names += [
+                "past_feat_dynamic_real",
+                "future_feat_dynamic_real",
+            ]
+        return names
 
     # Here we do only a simple operation to convert the input data to a form
     # that can be digested by our model by only splitting the target in two, a
@@ -202,7 +235,7 @@ class FeedForwardEstimator(GluonEstimator):
                 FieldName.FEAT_DYNAMIC_REAL,
             ],
             allow_missing=True,
-        )   + AddObservedValuesIndicator(
+        ) + AddObservedValuesIndicator(
             target_field=FieldName.TARGET,
             output_field=FieldName.OBSERVED_VALUES,
             dtype=self.dtype,
@@ -226,11 +259,7 @@ class FeedForwardEstimator(GluonEstimator):
             instance_sampler=instance_sampler,
             past_length=self.context_length,
             future_length=self.prediction_length,
-            time_series_fields=[FieldName.OBSERVED_VALUES,
-                                FieldName.FEAT_STATIC_CAT,
-                                FieldName.FEAT_DYNAMIC_CAT,
-                                FieldName.FEAT_DYNAMIC_REAL,
-                                ],
+            time_series_fields=self._instance_splitter_time_series_fields(),
         )
 
     def create_training_data_loader(
@@ -238,9 +267,7 @@ class FeedForwardEstimator(GluonEstimator):
         data: Dataset,
         **kwargs,
     ) -> DataLoader:
-        input_names = get_hybrid_forward_input_names(
-            FeedForwardTrainingNetwork
-        )
+        input_names = self._training_input_names()
         instance_splitter = self._create_instance_splitter("training")
         return TrainDataLoader(
             dataset=data,
@@ -255,9 +282,7 @@ class FeedForwardEstimator(GluonEstimator):
         data: Dataset,
         **kwargs,
     ) -> DataLoader:
-        input_names = get_hybrid_forward_input_names(
-            FeedForwardTrainingNetwork
-        )
+        input_names = self._training_input_names()
         instance_splitter = self._create_instance_splitter("validation")
         return ValidationDataLoader(
             dataset=data,
@@ -278,6 +303,7 @@ class FeedForwardEstimator(GluonEstimator):
             distr_output=self.distr_output,
             batch_normalization=self.batch_normalization,
             mean_scaling=self.mean_scaling,
+            num_feat_dynamic_real=self.num_feat_dynamic_real,
         )
 
     # we now define how the prediction happens given that we are provided a
@@ -295,11 +321,13 @@ class FeedForwardEstimator(GluonEstimator):
                 mean_scaling=self.mean_scaling,
                 params=trained_network.collect_params(),
                 num_parallel_samples=self.num_parallel_samples,
+                num_feat_dynamic_real=self.num_feat_dynamic_real,
             )
 
             return RepresentableBlockPredictor(
                 input_transform=transformation + prediction_splitter,
                 prediction_net=prediction_network,
+                input_names=self._prediction_input_names(),
                 batch_size=self.batch_size,
                 prediction_length=self.prediction_length,
                 ctx=self.trainer.ctx,
@@ -315,10 +343,12 @@ class FeedForwardEstimator(GluonEstimator):
                 mean_scaling=self.mean_scaling,
                 params=trained_network.collect_params(),
                 num_parallel_samples=self.num_parallel_samples,
+                num_feat_dynamic_real=self.num_feat_dynamic_real,
             )
             return RepresentableBlockPredictor(
                 input_transform=transformation + prediction_splitter,
                 prediction_net=prediction_network,
+                input_names=self._prediction_input_names(),
                 batch_size=self.batch_size,
                 forecast_generator=DistributionForecastGenerator(
                     self.distr_output

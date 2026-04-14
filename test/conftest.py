@@ -11,8 +11,19 @@
 # express or implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-
+import sys
 from pathlib import Path
+
+# Exercise the repository checkout (…/src/gluonts) when running tests, not a
+# separately installed site-packages tree, unless the user ordered paths
+# otherwise.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _REPO_ROOT / "src"
+if _SRC.is_dir():
+    _src_str = str(_SRC)
+    if _src_str not in sys.path:
+        sys.path.insert(0, _src_str)
+
 from typing import List, NamedTuple
 import gluonts
 import logging
@@ -21,7 +32,6 @@ import os
 import pandas as pd
 import pytest
 import random
-import sys
 import tempfile
 import warnings
 

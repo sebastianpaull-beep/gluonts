@@ -299,9 +299,12 @@ class RepresentableBlockPredictor(GluonPredictor):
             Callable[[DataEntry, np.ndarray], np.ndarray]
         ] = None,
         dtype: Type = np.float32,
+        input_names: Optional[List[str]] = None,
     ) -> None:
+        if input_names is None:
+            input_names = get_hybrid_forward_input_names(type(prediction_net))
         super().__init__(
-            input_names=get_hybrid_forward_input_names(type(prediction_net)),
+            input_names=input_names,
             prediction_net=prediction_net,
             batch_size=batch_size,
             prediction_length=prediction_length,
@@ -375,9 +378,10 @@ class RepresentableBlockPredictor(GluonPredictor):
             # deserialize prediction network
             prediction_net = import_repr_block(path, "prediction_net")
 
-            # input_names is derived from the prediction_net
-            if "input_names" in parameters:
-                del parameters["input_names"]
+            if "input_names" not in parameters:
+                parameters["input_names"] = get_hybrid_forward_input_names(
+                    type(prediction_net)
+                )
 
             parameters["ctx"] = ctx
 

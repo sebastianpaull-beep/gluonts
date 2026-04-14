@@ -11,7 +11,7 @@
 # express or implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import mxnet as mx
 
@@ -47,6 +47,11 @@ class FeedForwardNetworkBase(mx.gluon.HybridBlock):
         its inverse.
     distr_output
         Distribution to fit.
+    num_feat_dynamic_real
+        Number of dynamic real feature channels (past and future windows).
+        When 0, only ``past_target`` is used (original behaviour). When positive,
+        ``past_feat_dynamic_real`` and ``future_feat_dynamic_real`` are flattened
+        and concatenated with the scaled past target before the MLP.
     kwargs
     """
 
@@ -61,16 +66,22 @@ class FeedForwardNetworkBase(mx.gluon.HybridBlock):
         batch_normalization: bool,
         mean_scaling: bool,
         distr_output: DistributionOutput,
+        num_feat_dynamic_real: int = 0,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
 
+        assert num_feat_dynamic_real >= 0
         self.num_hidden_dimensions = num_hidden_dimensions
         self.prediction_length = prediction_length
         self.context_length = context_length
         self.batch_normalization = batch_normalization
         self.mean_scaling = mean_scaling
         self.distr_output = distr_output
+        self.num_feat_dynamic_real = num_feat_dynamic_real
+        self.flat_dim = context_length + num_feat_dynamic_real * (
+            context_length + prediction_length
+        )
 
         with self.name_scope():
             self.distr_args_proj = self.distr_output.get_args_proj()
@@ -90,20 +101,49 @@ class FeedForwardNetworkBase(mx.gluon.HybridBlock):
             )
             self.scaler = MeanScaler() if mean_scaling else NOPScaler()
 
+    def _mlp_input_from_scaled(
+        self,
+        F,
+        scaled_target: Tensor,
+        past_feat_dynamic_real: Optional[Tensor],
+        future_feat_dynamic_real: Optional[Tensor],
+    ) -> Tensor:
+        """
+        Build a flat MLP input: [flatten(scaled past target), flatten(past
+        features), flatten(future features)] when ``num_feat_dynamic_real > 0``.
+        """
+        if self.num_feat_dynamic_real == 0:
+            return scaled_target
+        assert past_feat_dynamic_real is not None
+        assert future_feat_dynamic_real is not None
+        st = F.reshape(scaled_target, (0, -1))
+        pf = F.reshape(past_feat_dynamic_real, (0, -1))
+        ff = F.reshape(future_feat_dynamic_real, (0, -1))
+        return F.concat(st, pf, ff, dim=1)
+
     def get_distr_args(
-        self, F, past_target: Tensor
+        self,
+        F,
+        past_target: Tensor,
+        past_feat_dynamic_real: Optional[Tensor] = None,
+        future_feat_dynamic_real: Optional[Tensor] = None,
     ) -> Tuple[Tensor, Tensor, Tensor]:
         """
-        Given past target values, applies the feed-forward network and maps the
-        output to the parameter of probability distribution for future
-        observations.
+        Given past target values (and optional dynamic real features), applies
+        the feed-forward network and maps the output to distribution parameters.
 
         Parameters
         ----------
         F
         past_target
             Tensor containing past target observations.
-            Shape: (batch_size, context_length, target_dim).
+            Shape: (batch_size, context_length) for univariate.
+        past_feat_dynamic_real
+            Optional. Shape: (batch_size, F, context_length) when
+            ``num_feat_dynamic_real > 0``.
+        future_feat_dynamic_real
+            Optional. Shape: (batch_size, F, prediction_length) when
+            ``num_feat_dynamic_real > 0``.
 
         Returns
         -------
@@ -118,7 +158,13 @@ class FeedForwardNetworkBase(mx.gluon.HybridBlock):
             past_target,
             F.ones_like(past_target),
         )
-        mlp_outputs = self.mlp(scaled_target)
+        mlp_in = self._mlp_input_from_scaled(
+            F,
+            scaled_target,
+            past_feat_dynamic_real,
+            future_feat_dynamic_real,
+        )
+        mlp_outputs = self.mlp(mlp_in)
         distr_args = self.distr_args_proj(mlp_outputs)
         scale = target_scale.expand_dims(axis=1)
         loc = F.zeros_like(scale)
@@ -132,6 +178,8 @@ class FeedForwardTrainingNetwork(FeedForwardNetworkBase):
         past_target: Tensor,
         future_target: Tensor,
         future_observed_values: Tensor,
+        past_feat_dynamic_real: Optional[Tensor] = None,
+        future_feat_dynamic_real: Optional[Tensor] = None,
     ) -> Tensor:
         """
         Computes a probability distribution for future data given the past, and
@@ -149,13 +197,24 @@ class FeedForwardTrainingNetwork(FeedForwardNetworkBase):
         future_observed_values
             Tensor indicating which values in the target are observed, and
             which ones are imputed instead.
+        past_feat_dynamic_real
+            Optional past window of dynamic real features when
+            ``num_feat_dynamic_real > 0``.
+        future_feat_dynamic_real
+            Optional future window of dynamic real features when
+            ``num_feat_dynamic_real > 0``.
 
         Returns
         -------
         Tensor
             Loss tensor. Shape: (batch_size, ).
         """
-        distr_args, loc, scale = self.get_distr_args(F, past_target)
+        distr_args, loc, scale = self.get_distr_args(
+            F,
+            past_target,
+            past_feat_dynamic_real,
+            future_feat_dynamic_real,
+        )
         distr = self.distr_output.distribution(
             distr_args, loc=loc, scale=scale
         )
@@ -179,7 +238,13 @@ class FeedForwardSamplingNetwork(FeedForwardNetworkBase):
         super().__init__(*args, **kwargs)
         self.num_parallel_samples = num_parallel_samples
 
-    def hybrid_forward(self, F, past_target: Tensor) -> Tensor:
+    def hybrid_forward(
+        self,
+        F,
+        past_target: Tensor,
+        past_feat_dynamic_real: Optional[Tensor] = None,
+        future_feat_dynamic_real: Optional[Tensor] = None,
+    ) -> Tensor:
         """
         Computes a probability distribution for future data given the past, and
         draws samples from it.
@@ -190,6 +255,12 @@ class FeedForwardSamplingNetwork(FeedForwardNetworkBase):
         past_target
             Tensor with past observations.
             Shape: (batch_size, context_length, target_dim).
+        past_feat_dynamic_real
+            Optional past window of dynamic real features when
+            ``num_feat_dynamic_real > 0``.
+        future_feat_dynamic_real
+            Optional future window of dynamic real features when
+            ``num_feat_dynamic_real > 0``.
 
         Returns
         -------
@@ -197,7 +268,12 @@ class FeedForwardSamplingNetwork(FeedForwardNetworkBase):
             Prediction sample. Shape: (batch_size, samples, prediction_length).
         """
 
-        distr_args, loc, scale = self.get_distr_args(F, past_target)
+        distr_args, loc, scale = self.get_distr_args(
+            F,
+            past_target,
+            past_feat_dynamic_real,
+            future_feat_dynamic_real,
+        )
         distr = self.distr_output.distribution(
             distr_args, loc=loc, scale=scale
         )
@@ -217,7 +293,13 @@ class FeedForwardDistributionNetwork(FeedForwardNetworkBase):
         super().__init__(*args, **kwargs)
         self.num_parallel_samples = num_parallel_samples
 
-    def hybrid_forward(self, F, past_target: Tensor) -> Tensor:
+    def hybrid_forward(
+        self,
+        F,
+        past_target: Tensor,
+        past_feat_dynamic_real: Optional[Tensor] = None,
+        future_feat_dynamic_real: Optional[Tensor] = None,
+    ) -> Tensor:
         """
         Computes the parameters of distribution for future data given the past,
         and draws samples from it.
@@ -228,6 +310,12 @@ class FeedForwardDistributionNetwork(FeedForwardNetworkBase):
         past_target
             Tensor with past observations.
             Shape: (batch_size, context_length, target_dim).
+        past_feat_dynamic_real
+            Optional past window of dynamic real features when
+            ``num_feat_dynamic_real > 0``.
+        future_feat_dynamic_real
+            Optional future window of dynamic real features when
+            ``num_feat_dynamic_real > 0``.
 
         Returns
         -------
@@ -238,5 +326,10 @@ class FeedForwardDistributionNetwork(FeedForwardNetworkBase):
         Tensor
             An array containing the scale of the distribution.
         """
-        distr_args, loc, scale = self.get_distr_args(F, past_target)
+        distr_args, loc, scale = self.get_distr_args(
+            F,
+            past_target,
+            past_feat_dynamic_real,
+            future_feat_dynamic_real,
+        )
         return distr_args, loc, scale

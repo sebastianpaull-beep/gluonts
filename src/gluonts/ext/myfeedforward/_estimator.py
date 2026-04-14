@@ -11,46 +11,31 @@
 # express or implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-from gluonts.core.component import validated
-from gluonts.mx.model.estimator import GluonEstimator
-from gluonts.mx.trainer import Trainer
-from gluonts.mx.util import get_hybrid_forward_input_names
-from gluonts.transform import (
-    ExpectedNumInstanceSampler,
-    InstanceSplitter,
-    SelectFields,
-    TestSplitSampler,
-    Transformation,
-)
-
 from functools import partial
+
 from mxnet.gluon import HybridBlock
+
 from gluonts.core.component import validated
+from gluonts.dataset.field_names import FieldName
 from gluonts.dataset.loader import TrainDataLoader
 from gluonts.model.predictor import Predictor
 from gluonts.mx import (
     batchify,
     copy_parameters,
-    get_hybrid_forward_input_names,
-    GluonEstimator,
     RepresentableBlockPredictor,
     Trainer,
 )
+from gluonts.mx.model.estimator import GluonEstimator
 from gluonts.transform import (
-    ExpectedNumInstanceSampler,
-    Transformation,
-    InstanceSplitter,
-    TestSplitSampler,
-    SelectFields,
     Chain,
+    ExpectedNumInstanceSampler,
+    InstanceSplitter,
+    SelectFields,
+    TestSplitSampler,
+    Transformation,
 )
 
-from ._network import (
-    MyFeedForwardTrainNetwork,
-    MyFeedForwardPredNetwork,
-)
-
-from gluonts.dataset.field_names import FieldName
+from ._network import MyFeedForwardPredNetwork, MyFeedForwardTrainNetwork
 
 
 class MyFeedForwardEstimator(GluonEstimator):
@@ -62,11 +47,32 @@ class MyFeedForwardEstimator(GluonEstimator):
         num_cells: int,
         batch_size: int = 32,
         trainer: Trainer = Trainer(),
+        num_feat_dynamic_real: int = 0,
     ) -> None:
         super().__init__(trainer=trainer, batch_size=batch_size)
+        assert num_feat_dynamic_real >= 0
         self.prediction_length = prediction_length
         self.context_length = context_length
         self.num_cells = num_cells
+        self.num_feat_dynamic_real = num_feat_dynamic_real
+
+    def _training_input_names(self):
+        names = ["past_target", "future_target"]
+        if self.num_feat_dynamic_real > 0:
+            names += [
+                "past_feat_dynamic_real",
+                "future_feat_dynamic_real",
+            ]
+        return names
+
+    def _prediction_input_names(self):
+        names = ["past_target"]
+        if self.num_feat_dynamic_real > 0:
+            names += [
+                "past_feat_dynamic_real",
+                "future_feat_dynamic_real",
+            ]
+        return names
 
     def create_transformation(self):
         return Chain([])
@@ -88,7 +94,7 @@ class MyFeedForwardEstimator(GluonEstimator):
                 FieldName.FEAT_DYNAMIC_REAL,
             ],
         )
-        input_names = get_hybrid_forward_input_names(MyFeedForwardTrainNetwork)
+        input_names = self._training_input_names()
         return TrainDataLoader(
             dataset=dataset,
             transform=instance_splitter + SelectFields(input_names),
@@ -97,9 +103,12 @@ class MyFeedForwardEstimator(GluonEstimator):
             **kwargs,
         )
 
-    def create_training_network(self) -> MyFeedForwardTrainNetwork:
+    def create_training_network(self) -> HybridBlock:
         return MyFeedForwardTrainNetwork(
-            prediction_length=self.prediction_length, num_cells=self.num_cells
+            prediction_length=self.prediction_length,
+            num_cells=self.num_cells,
+            context_length=self.context_length,
+            num_feat_dynamic_real=self.num_feat_dynamic_real,
         )
 
     def create_predictor(
@@ -121,7 +130,10 @@ class MyFeedForwardEstimator(GluonEstimator):
         )
 
         prediction_network = MyFeedForwardPredNetwork(
-            prediction_length=self.prediction_length, num_cells=self.num_cells
+            prediction_length=self.prediction_length,
+            num_cells=self.num_cells,
+            context_length=self.context_length,
+            num_feat_dynamic_real=self.num_feat_dynamic_real,
         )
 
         copy_parameters(trained_network, prediction_network)
@@ -129,6 +141,7 @@ class MyFeedForwardEstimator(GluonEstimator):
         return RepresentableBlockPredictor(
             input_transform=transformation + prediction_splitter,
             prediction_net=prediction_network,
+            input_names=self._prediction_input_names(),
             batch_size=self.batch_size,
             prediction_length=self.prediction_length,
             ctx=self.trainer.ctx,
