@@ -13,5 +13,14 @@
 
 from ._estimator import TreeEstimator
 from ._predictor import TreePredictor
+from ._preprocess_no_stats import (
+    PreprocessOnlyLagFeaturesNoStats,
+    apply_rotbaum_no_stats_preprocess_patch,
+)
 
-__all__ = ["TreeEstimator", "TreePredictor"]
+__all__ = [
+    "TreeEstimator",
+    "TreePredictor",
+    "PreprocessOnlyLagFeaturesNoStats",
+    "apply_rotbaum_no_stats_preprocess_patch",
+]

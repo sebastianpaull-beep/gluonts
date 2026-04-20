@@ -192,6 +192,34 @@ class TreePredictor(RepresentablePredictor):
         # timestep in the forecast horizon to create the partition.
     ):
         assert training_data
+        # Debugging aid: log the exact feature layout being fed to LightGBM.
+        try:
+            first_ts = first(training_data)
+            logger.info("[Rotbaum] first_ts keys: %s", sorted(first_ts.keys()))
+            logger.info(
+                "[Rotbaum] preprocess_object=%s context_length=%s prediction_length=%s "
+                "use_feat_static_real=%s use_past_feat_dynamic_real=%s "
+                "use_feat_dynamic_real=%s use_feat_dynamic_cat=%s "
+                "one_hot_encode=%s cardinality=%s subtract_mean=%s count_nans=%s "
+                "dynamic_length=%s",
+                type(self.preprocess_object).__name__,
+                getattr(self.preprocess_object, "context_window_size", None),
+                getattr(self.preprocess_object, "forecast_horizon", None),
+                getattr(self.preprocess_object, "use_feat_static_real", None),
+                getattr(
+                    self.preprocess_object, "use_past_feat_dynamic_real", None
+                ),
+                getattr(self.preprocess_object, "use_feat_dynamic_real", None),
+                getattr(self.preprocess_object, "use_feat_dynamic_cat", None),
+                getattr(self.preprocess_object, "one_hot_encode", None),
+                getattr(self.preprocess_object, "cardinality", None),
+                getattr(self.preprocess_object, "subtract_mean", None),
+                getattr(self.preprocess_object, "count_nans", None),
+                getattr(self.preprocess_object, "dynamic_length", None),
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.info("[Rotbaum] debug logging failed: %r", exc)
+
         if self.preprocess_object.use_feat_dynamic_real:
             assert (
                 len(first(training_data)["feat_dynamic_real"][0])
@@ -212,6 +240,38 @@ class TreePredictor(RepresentablePredictor):
             self.preprocess_object.feature_data,
             self.preprocess_object.target_data,
         )
+        try:
+            # After preprocessing, feature_data are flat lists; log their width.
+            if feature_data:
+                logger.info(
+                    "[Rotbaum] feature_data rows=%s row_width=%s (LightGBM features)",
+                    len(feature_data),
+                    len(feature_data[0]),
+                )
+            # Also show one explicit make_features breakdown for a deterministic window.
+            first_ts = first(training_data)
+            context_length = self.preprocess_object.context_window_size
+            start_idx = 0
+            try:
+                # Prefer a stable start index that is valid for typical series.
+                if len(first_ts.get("target", [])) >= context_length:
+                    start_idx = max(
+                        0, len(first_ts["target"]) - context_length
+                    )
+            except Exception:
+                start_idx = 0
+            mf = self.preprocess_object.make_features(
+                first_ts, starting_index=start_idx
+            )
+            logger.info(
+                "[Rotbaum] make_features(starting_index=%s) length=%s",
+                start_idx,
+                len(mf),
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.info(
+                "[Rotbaum] post-preprocess debug logging failed: %r", exc
+            )
         n_models = self.prediction_length
         logging.info(f"Length of forecast horizon: {n_models}")
         if self.method == "QuantileRegression":
@@ -247,13 +307,17 @@ class TreePredictor(RepresentablePredictor):
                 np.array(target_data)[:, train_QRX_only_using_timestep],
             )
             self.model_list = [
-                QRX(
-                    xgboost_params=self.model_params,
-                    min_bin_size=self.min_bin_size,
-                    model=self.model_list[train_QRX_only_using_timestep].model,
+                (
+                    QRX(
+                        xgboost_params=self.model_params,
+                        min_bin_size=self.min_bin_size,
+                        model=self.model_list[
+                            train_QRX_only_using_timestep
+                        ].model,
+                    )
+                    if i != train_QRX_only_using_timestep
+                    else self.model_list[i]
                 )
-                if i != train_QRX_only_using_timestep
-                else self.model_list[i]
                 for i in range(n_models)
             ]
             target_data = np.array(target_data)
