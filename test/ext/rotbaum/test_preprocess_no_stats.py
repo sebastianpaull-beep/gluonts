@@ -38,8 +38,8 @@ def restore_preprocess_only_lag_features():
     rot_preprocess.PreprocessOnlyLagFeatures = orig_pre
 
 
-def test_preprocess_no_stats_make_features_length():
-    """Raw target lags + one past + one future-known channel, no stat columns."""
+def test_preprocess_no_stats_make_features_length_and_fdr_value():
+    """Per-horizon feat_dynamic_real: one scalar per channel at t+h."""
     context = 5
     horizon = 4
     preprocess = PreprocessOnlyLagFeaturesNoStats(
@@ -55,6 +55,7 @@ def test_preprocess_no_stats_make_features_length():
         count_nans=False,
     )
     assert preprocess.dynamic_length == context
+    assert preprocess.slices_feat_dynamic_real_per_horizon is True
 
     rng = np.random.default_rng(0)
     t_len = 80
@@ -70,9 +71,15 @@ def test_preprocess_no_stats_make_features_length():
         "feat_dynamic_real": [fd_row.tolist()],
         "feat_dynamic_cat": [],
     }
-    feats = preprocess.make_features(ts, starting_index=0)
-    expected = context + context + (context + horizon)
-    assert len(feats) == expected
+    legacy_fdr_width = context + horizon  # old no-stats flat FDR block width
+    for h in range(horizon):
+        feats = preprocess.make_features(ts, starting_index=0, horizon_index=h)
+        expected = context + context + 1
+        assert len(feats) == expected
+        assert len(feats) < context + context + legacy_fdr_width
+        # feat order: lags | past | fdr (one float)
+        fdr_scalar = feats[-1]
+        assert fdr_scalar == pytest.approx(float(fd_row[context + h]))
 
 
 def test_preprocess_no_stats_apply_patch_trains(
@@ -125,8 +132,13 @@ def test_preprocess_no_stats_apply_patch_trains(
         count_nans=False,
     )
     predictor = estimator.train(training_data=ds)
-    row = predictor.preprocess_object.make_features(train, starting_index=0)
-    assert len(row) == context + context + (context + horizon)
+    row = predictor.preprocess_object.make_features(
+        train, starting_index=0, horizon_index=0
+    )
+    assert len(row) == context + context + 1
+    forecasts = list(predictor.predict(ds))
+    assert len(forecasts) == 1
+    assert forecasts[0].quantile(0.5).shape == (horizon,)
 
 
 def test_preprocess_no_stats_subclass_is_stock_preprocessor():

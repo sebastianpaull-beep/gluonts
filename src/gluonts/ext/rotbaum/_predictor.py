@@ -68,8 +68,8 @@ class RotbaumForecast(Forecast):
         return np.array(
             list(
                 chain.from_iterable(
-                    model.predict(self.featurized_data, q)
-                    for model in self.models
+                    model.predict(self.featurized_data[h], q)
+                    for h, model in enumerate(self.models)
                 )
             )
         )
@@ -83,8 +83,8 @@ class RotbaumForecast(Forecast):
         return np.array(
             list(
                 chain.from_iterable(
-                    model.estimate_dist(self.featurized_data)
-                    for model in self.models
+                    model.estimate_dist(self.featurized_data[h])
+                    for h, model in enumerate(self.models)
                 )
             )
         )
@@ -184,6 +184,13 @@ class TreePredictor(RepresentablePredictor):
             " num_workers=0."
         )
 
+    @staticmethod
+    def _uses_per_horizon_feat_dynamic_real(preprocess_object) -> bool:
+        return (
+            getattr(preprocess_object, "feature_data_per_horizon", None)
+            is not None
+        )
+
     def train(
         self,
         training_data,
@@ -236,43 +243,78 @@ class TreePredictor(RepresentablePredictor):
         self.preprocess_object.preprocess_from_list(
             ts_list=list(training_data), change_internal_variables=True
         )
-        feature_data, target_data = (
-            self.preprocess_object.feature_data,
-            self.preprocess_object.target_data,
+        target_data = self.preprocess_object.target_data
+        per_h = self._uses_per_horizon_feat_dynamic_real(
+            self.preprocess_object
         )
+        if per_h:
+            feature_data_per_horizon = (
+                self.preprocess_object.feature_data_per_horizon
+            )
+            feature_data = None
+        else:
+            feature_data_per_horizon = None
+            feature_data = self.preprocess_object.feature_data
         try:
-            # After preprocessing, feature_data are flat lists; log their width.
-            if feature_data:
+            if per_h and feature_data_per_horizon[0]:
+                logger.info(
+                    "[Rotbaum] feature_data rows=%s row_width=%s (LightGBM features, "
+                    "per horizon)",
+                    len(feature_data_per_horizon[0]),
+                    len(feature_data_per_horizon[0][0]),
+                )
+            elif feature_data:
                 logger.info(
                     "[Rotbaum] feature_data rows=%s row_width=%s (LightGBM features)",
                     len(feature_data),
                     len(feature_data[0]),
                 )
-            # Also show one explicit make_features breakdown for a deterministic window.
             first_ts = first(training_data)
             context_length = self.preprocess_object.context_window_size
             start_idx = 0
             try:
-                # Prefer a stable start index that is valid for typical series.
                 if len(first_ts.get("target", [])) >= context_length:
                     start_idx = max(
                         0, len(first_ts["target"]) - context_length
                     )
             except Exception:
                 start_idx = 0
-            mf = self.preprocess_object.make_features(
-                first_ts, starting_index=start_idx
-            )
-            logger.info(
-                "[Rotbaum] make_features(starting_index=%s) length=%s",
-                start_idx,
-                len(mf),
-            )
+            if per_h:
+                h_last = self.prediction_length - 1
+                mf0 = self.preprocess_object.make_features(
+                    first_ts, start_idx, 0
+                )
+                mf_last = self.preprocess_object.make_features(
+                    first_ts, start_idx, h_last
+                )
+                logger.info(
+                    "[Rotbaum] make_features(starting_index=%s) len h=0: %s "
+                    "len h=%s: %s",
+                    start_idx,
+                    len(mf0),
+                    h_last,
+                    len(mf_last),
+                )
+            else:
+                mf = self.preprocess_object.make_features(
+                    first_ts, starting_index=start_idx
+                )
+                logger.info(
+                    "[Rotbaum] make_features(starting_index=%s) length=%s",
+                    start_idx,
+                    len(mf),
+                )
         except Exception as exc:  # pragma: no cover
             logger.info(
                 "[Rotbaum] post-preprocess debug logging failed: %r", exc
             )
         n_models = self.prediction_length
+
+        def rows_for_step(step_idx: int):
+            if feature_data_per_horizon is not None:
+                return feature_data_per_horizon[step_idx]
+            return feature_data
+
         logging.info(f"Length of forecast horizon: {n_models}")
         if self.method == "QuantileRegression":
             self.model_list = [
@@ -303,7 +345,7 @@ class TreePredictor(RepresentablePredictor):
                 f" {train_QRX_only_using_timestep} in the forecast horizon"
             )
             self.model_list[train_QRX_only_using_timestep].fit(
-                feature_data,
+                rows_for_step(train_QRX_only_using_timestep),
                 np.array(target_data)[:, train_QRX_only_using_timestep],
             )
             self.model_list = [
@@ -339,7 +381,7 @@ class TreePredictor(RepresentablePredictor):
                         )
                         executor.submit(
                             model.fit,
-                            list(compress(feature_data, indices)),
+                            list(compress(rows_for_step(n_step), indices)),
                             current_target_data[indices],
                             model_is_already_trained=True,
                         )
@@ -361,7 +403,7 @@ class TreePredictor(RepresentablePredictor):
                     )
                     executor.submit(
                         model.fit,
-                        list(compress(feature_data, indices)),
+                        list(compress(rows_for_step(n_step), indices)),
                         current_target_data[indices],
                     )
         return self
@@ -389,12 +431,25 @@ class TreePredictor(RepresentablePredictor):
             logger.error("model_list is empty during prediction")
 
         for ts in dataset:
-            featurized_data = self.preprocess_object.make_features(
-                ts, starting_index=len(ts["target"]) - context_length
-            )
+            start_ix = len(ts["target"]) - context_length
+            if self._uses_per_horizon_feat_dynamic_real(
+                self.preprocess_object
+            ):
+                featurized_per_h = [
+                    [self.preprocess_object.make_features(ts, start_ix, h)]
+                    for h in range(self.prediction_length)
+                ]
+            else:
+                row = self.preprocess_object.make_features(
+                    ts, starting_index=start_ix
+                )
+                featurized_per_h = [
+                    [row] for _ in range(self.prediction_length)
+                ]
+
             yield RotbaumForecast(
                 self.model_list,
-                [featurized_data],
+                featurized_per_h,
                 start_date=forecast_start(ts),
                 prediction_length=self.prediction_length,
             )
@@ -505,35 +560,35 @@ class TreePredictor(RepresentablePredictor):
             )
             for i in range(num_past_feat_dynamic_real)
         ]
-        coordinate_map["feat_dynamic_real"] = [
-            (
-                num_feat_static_real
-                + static_cat_features_so_far
-                + (num_past_feat_dynamic_real + 1) * dynamic_length
-                + i * (dynamic_length + self.prediction_length),
-                num_feat_static_real
-                + static_cat_features_so_far
-                + (num_past_feat_dynamic_real + 1) * dynamic_length
-                + (i + 1) * (dynamic_length + self.prediction_length),
+        base_fdr = (
+            num_feat_static_real
+            + static_cat_features_so_far
+            + (num_past_feat_dynamic_real + 1) * dynamic_length
+        )
+        if getattr(
+            self.preprocess_object,
+            "slices_feat_dynamic_real_per_horizon",
+            False,
+        ):
+            coordinate_map["feat_dynamic_real"] = [
+                (base_fdr + i, base_fdr + i + 1)
+                for i in range(num_feat_dynamic_real)
+            ]
+            start_fdcat = base_fdr + num_feat_dynamic_real
+        else:
+            coordinate_map["feat_dynamic_real"] = [
+                (
+                    base_fdr + i * (dynamic_length + self.prediction_length),
+                    base_fdr
+                    + (i + 1) * (dynamic_length + self.prediction_length),
+                )
+                for i in range(num_feat_dynamic_real)
+            ]
+            start_fdcat = base_fdr + num_feat_dynamic_real * (
+                dynamic_length + self.prediction_length
             )
-            for i in range(num_feat_dynamic_real)
-        ]
         coordinate_map["feat_dynamic_cat"] = [
-            (
-                num_feat_static_real
-                + static_cat_features_so_far
-                + (num_past_feat_dynamic_real + 1) * dynamic_length
-                + num_feat_dynamic_real
-                * (dynamic_length + self.prediction_length)
-                + i,
-                num_feat_static_real
-                + static_cat_features_so_far
-                + (num_past_feat_dynamic_real + 1) * dynamic_length
-                + num_feat_dynamic_real
-                * (dynamic_length + self.prediction_length)
-                + i
-                + 1,
-            )
+            (start_fdcat + i, start_fdcat + i + 1)
             for i in range(num_feat_dynamic_cat)
         ]
         logger.info(
