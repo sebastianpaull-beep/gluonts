@@ -195,12 +195,79 @@ class TreePredictor(RepresentablePredictor):
             is not None
         )
 
+    def _append_predict_origin_rows(
+        self, append_predict_origin_from: Dataset
+    ) -> None:
+        """
+        Append predict-origin rows from test-shaped series, repeated to match
+        the historical sliding-window count so LightGBM can learn identity.
+        """
+        preprocess = self.preprocess_object
+        if not self._uses_per_horizon_feat_dynamic_real(preprocess):
+            logger.warning(
+                "append_predict_origin requires per-horizon feat_dynamic_real; "
+                "skipping."
+            )
+            return
+
+        context = preprocess.context_window_size
+        pred_len = preprocess.forecast_horizon
+        feature_data_per_h = preprocess.feature_data_per_horizon
+        target_data = preprocess.target_data
+        n_windows_before = len(target_data)
+        origin_blocks: list[tuple[list, list]] = []
+
+        for test_ts in append_predict_origin_from:
+            target = np.asarray(test_ts["target"], dtype=float)
+            if len(target) < context + pred_len:
+                continue
+            predict_start = len(target) - context
+            origin_targets = target[-pred_len:].tolist()
+            origin_rows = [
+                preprocess.make_features(test_ts, predict_start, h)
+                for h in range(pred_len)
+            ]
+            origin_blocks.append((origin_rows, origin_targets))
+
+        if not origin_blocks:
+            logger.warning(
+                "[Rotbaum] append_predict_origin: no valid series; skipping"
+            )
+            return
+
+        for origin_rows, origin_targets in origin_blocks:
+            for h in range(pred_len):
+                feature_data_per_h[h].append(origin_rows[h])
+            target_data.append(origin_targets)
+
+        n_origin = len(origin_blocks)
+        repeat_each = max(1, n_windows_before // n_origin)
+        origin_start = n_windows_before
+        for block_offset in range(n_origin):
+            block_idx = origin_start + block_offset
+            origin_target_vec = target_data[block_idx]
+            origin_rows = [feature_data_per_h[h][block_idx] for h in range(pred_len)]
+            for _ in range(repeat_each - 1):
+                for h in range(pred_len):
+                    feature_data_per_h[h].append(origin_rows[h])
+                target_data.append(origin_target_vec)
+
+        logger.info(
+            "[Rotbaum] appended predict-origin rows: %s series, repeat_each=%s "
+            "(historical_windows=%s, total_rows=%s)",
+            n_origin,
+            repeat_each,
+            n_windows_before,
+            len(target_data),
+        )
+
     def train(
         self,
         training_data,
         train_QRX_only_using_timestep: int = -1,  # If not -1 and self.method
         # == 'QRX', this will use only the train_QRX_only_using_timestep^th
         # timestep in the forecast horizon to create the partition.
+        append_predict_origin_from: Optional[Dataset] = None,
     ):
         assert training_data
         # Debugging aid: log the exact feature layout being fed to LightGBM.
@@ -247,6 +314,8 @@ class TreePredictor(RepresentablePredictor):
         self.preprocess_object.preprocess_from_list(
             ts_list=list(training_data), change_internal_variables=True
         )
+        if append_predict_origin_from is not None:
+            self._append_predict_origin_rows(append_predict_origin_from)
         target_data = self.preprocess_object.target_data
         per_h = self._uses_per_horizon_feat_dynamic_real(
             self.preprocess_object

@@ -175,3 +175,149 @@ def test_use_parallel_preprocess_honours_env_override(monkeypatch):
     assert _use_parallel_preprocess(10) is False
     monkeypatch.setenv("GLUONTS_ROTBAUM_PREPROCESS_WORKERS", "2")
     assert _use_parallel_preprocess(1) is True
+
+
+def _oracle_train_test_pair(
+    horizon: int, context: int, rng: np.random.Generator
+) -> tuple[dict, dict]:
+    """Train/test entries mirroring GluonTS + Doctorate oracle split."""
+    t_len = 80
+    y = rng.normal(size=t_len).astype(np.float32)
+    fdr = np.concatenate([y, y[-horizon:]]).astype(np.float32)
+    past_row = y[:-horizon]
+    train = {
+        FieldName.TARGET: y[:-horizon].tolist(),
+        FieldName.START: pd.Period("2020-01-06", freq="W-MON"),
+        FieldName.FEAT_DYNAMIC_REAL: [fdr.tolist()],
+        FieldName.PAST_FEAT_DYNAMIC_REAL: [past_row.tolist()],
+    }
+    test = {
+        FieldName.TARGET: y.tolist(),
+        FieldName.START: pd.Period("2020-01-06", freq="W-MON"),
+        FieldName.FEAT_DYNAMIC_REAL: [fdr.tolist()],
+        FieldName.PAST_FEAT_DYNAMIC_REAL: [past_row.tolist()],
+    }
+    return train, test
+
+
+def _predict_row_in_train_matrix(predictor, test_entry, horizon: int) -> bool:
+    preprocess = predictor.preprocess_object
+    context = preprocess.context_window_size
+    target = np.asarray(test_entry["target"], dtype=float)
+    predict_start = len(target) - context
+    per_h = preprocess.feature_data_per_horizon
+    for h in range(horizon):
+        predict_row = preprocess.make_features(test_entry, predict_start, h)
+        if not any(
+            np.allclose(predict_row, row, atol=1e-9, rtol=0)
+            for row in per_h[h]
+        ):
+            return False
+    return True
+
+
+def test_append_predict_origin_closes_h10_h11_gap(
+    restore_preprocess_only_lag_features,
+):
+    """Without append: predict row absent; with append: all horizons match."""
+    apply_rotbaum_no_stats_preprocess_patch()
+    horizon = 4
+    context = 1
+    rng = np.random.default_rng(42)
+    train, test = _oracle_train_test_pair(horizon, context, rng)
+    train_ds = ListDataset([train], freq="W-MON")
+    test_ds = ListDataset([test], freq="W-MON")
+
+    base_kwargs = dict(
+        freq="W-MON",
+        prediction_length=horizon,
+        context_length=context,
+        method="QuantileRegression",
+        quantiles=[0.5],
+        model_params={
+            "n_estimators": 5,
+            "learning_rate": 0.1,
+            "num_leaves": 8,
+            "n_jobs": 1,
+            "random_state": 0,
+        },
+        use_feat_static_real=False,
+        use_past_feat_dynamic_real=True,
+        use_feat_dynamic_real=True,
+        subtract_mean=False,
+        count_nans=False,
+    )
+
+    predictor_baseline = TreeEstimator(**base_kwargs).train(
+        training_data=train_ds
+    )
+    assert not _predict_row_in_train_matrix(predictor_baseline, test, horizon)
+
+    train_target_len = len(train["target"])
+    predict_start = len(test["target"]) - context
+    last_train_start = train_target_len - context - horizon
+    assert predict_start - last_train_start == 2 * horizon
+
+    predictor_fixed = TreeEstimator(**base_kwargs).train(
+        training_data=train_ds,
+        validation_dataset=test_ds,
+        append_predict_origin=True,
+    )
+    assert _predict_row_in_train_matrix(predictor_fixed, test, horizon)
+
+
+def test_append_predict_origin_oracle_lgbm_mae_near_zero(
+    restore_preprocess_only_lag_features,
+):
+    """LGBM with oracle-only features copies y when predict-origin is appended."""
+    apply_rotbaum_no_stats_preprocess_patch()
+    horizon = 4
+    context = 1
+    rng = np.random.default_rng(7)
+    t_len = 80
+    y = rng.uniform(10, 100, size=t_len).astype(np.float32)
+    fdr = np.concatenate([y, y[-horizon:]]).astype(np.float32)
+    past_row = y[:-horizon]
+    train = {
+        FieldName.TARGET: y[:-horizon].tolist(),
+        FieldName.START: pd.Period("2020-01-06", freq="W-MON"),
+        FieldName.FEAT_DYNAMIC_REAL: [fdr.tolist()],
+        FieldName.PAST_FEAT_DYNAMIC_REAL: [past_row.tolist()],
+    }
+    test = {
+        FieldName.TARGET: y.tolist(),
+        FieldName.START: pd.Period("2020-01-06", freq="W-MON"),
+        FieldName.FEAT_DYNAMIC_REAL: [fdr.tolist()],
+        FieldName.PAST_FEAT_DYNAMIC_REAL: [past_row.tolist()],
+    }
+    train_ds = ListDataset([train], freq="W-MON")
+    test_ds = ListDataset([test], freq="W-MON")
+
+    estimator = TreeEstimator(
+        freq="W-MON",
+        prediction_length=horizon,
+        context_length=context,
+        method="QuantileRegression",
+        quantiles=[0.5],
+        model_params={
+            "n_estimators": 50,
+            "learning_rate": 0.1,
+            "num_leaves": 31,
+            "n_jobs": 1,
+            "random_state": 0,
+        },
+        use_feat_static_real=False,
+        use_past_feat_dynamic_real=True,
+        use_feat_dynamic_real=True,
+        subtract_mean=False,
+        count_nans=False,
+    )
+    predictor = estimator.train(
+        training_data=train_ds,
+        validation_dataset=test_ds,
+        append_predict_origin=True,
+    )
+    forecast = list(predictor.predict(test_ds))[0].quantile(0.5)
+    actual = np.asarray(y[-horizon:], dtype=float)
+    mae = float(np.mean(np.abs(forecast - actual)))
+    assert mae < 1.0

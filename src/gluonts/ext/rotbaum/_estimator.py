@@ -48,3 +48,16 @@ class TreeEstimator(ThirdPartyEstimator):
     )  # Reuse the model Predictor model
     def __init__(self, **kwargs) -> None:
         super().__init__(predictor_cls=TreePredictor, **kwargs)
+
+    def train(
+        self,
+        training_data: Dataset,
+        validation_dataset=None,
+        append_predict_origin: bool = False,
+    ) -> Predictor:
+        return self.predictor.train(
+            training_data,
+            append_predict_origin_from=(
+                validation_dataset if append_predict_origin else None
+            ),
+        )
