@@ -39,6 +39,19 @@ class QRF:
         return self.model.predict(x_test, quantile=100 * quantile)
 
 
+class CopyOracle:
+    """Trivial predictor: forecast = last feature column (future oracle scalar)."""
+
+    def fit(self, x_train, y_train, **kwargs):
+        return self
+
+    def predict(self, x_test, quantile=None):
+        X = np.asarray(x_test, dtype=float)
+        if X.ndim == 1:
+            return np.array([float(X[-1])])
+        return X[:, -1]
+
+
 class QuantileReg:
     @validated()
     def __init__(self, quantiles: List, params: Optional[dict] = None):

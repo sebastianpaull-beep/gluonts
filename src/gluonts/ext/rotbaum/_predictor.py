@@ -28,7 +28,7 @@ from gluonts.model.forecast import Forecast
 from gluonts.model.forecast_generator import log_once
 from gluonts.model.predictor import RepresentablePredictor
 
-from ._model import QRF, QRX, QuantileReg
+from ._model import CopyOracle, QRF, QRX, QuantileReg
 from ._preprocess import Cardinality, PreprocessOnlyLagFeatures
 from ._types import FeatureImportanceResult, ExplanationResult
 
@@ -129,7 +129,11 @@ class TreePredictor(RepresentablePredictor):
             "QRX",
             "QuantileRegression",
             "QRF",
-        ], "method has to be either 'QRX', 'QuantileRegression', or 'QRF'"
+            "CopyOracle",
+        ], (
+            "method has to be either 'QRX', 'QuantileRegression', 'QRF', "
+            "or 'CopyOracle'"
+        )
         self.method = method
         self.lead_time = lead_time
         self.context_length = (
@@ -334,6 +338,9 @@ class TreePredictor(RepresentablePredictor):
                 )
                 for _ in range(n_models)
             ]
+        elif self.method == "CopyOracle":
+            self.model_list = [CopyOracle() for _ in range(n_models)]
+            return self
         if train_QRX_only_using_timestep != -1:
             assert (
                 0
