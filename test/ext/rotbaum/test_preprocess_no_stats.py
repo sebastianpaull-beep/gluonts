@@ -145,3 +145,33 @@ def test_preprocess_no_stats_subclass_is_stock_preprocessor():
     assert PreprocessOnlyLagFeaturesNoStats.__bases__ == (
         PreprocessOnlyLagFeatures,
     )
+
+
+def test_use_parallel_preprocess_disabled_with_active_spark_context(
+    monkeypatch,
+):
+    from gluonts.ext.rotbaum._preprocess_no_stats import (
+        _use_parallel_preprocess,
+    )
+
+    class _FakeSparkContext:
+        _active_spark_context = object()
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "pyspark",
+        type("pyspark", (), {"SparkContext": _FakeSparkContext}),
+    )
+    assert _use_parallel_preprocess(10) is False
+
+
+def test_use_parallel_preprocess_honours_env_override(monkeypatch):
+    from gluonts.ext.rotbaum._preprocess_no_stats import (
+        _use_parallel_preprocess,
+    )
+
+    monkeypatch.delenv("GLUONTS_ROTBAUM_PREPROCESS_WORKERS", raising=False)
+    monkeypatch.setenv("GLUONTS_ROTBAUM_PREPROCESS_WORKERS", "0")
+    assert _use_parallel_preprocess(10) is False
+    monkeypatch.setenv("GLUONTS_ROTBAUM_PREPROCESS_WORKERS", "2")
+    assert _use_parallel_preprocess(1) is True

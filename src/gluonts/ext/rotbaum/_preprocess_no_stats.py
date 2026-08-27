@@ -15,6 +15,7 @@
 
 import concurrent.futures
 import logging
+import os
 from itertools import chain
 from typing import Dict, List, Tuple
 
@@ -31,6 +32,21 @@ def _preprocess_no_stats_ts_worker(
     """Picklable worker for ``ProcessPoolExecutor`` (single-arg tuple)."""
     preprocess, ts = args
     return preprocess._preprocess_single_ts_all_horizons(ts)
+
+
+def _use_parallel_preprocess(ts_list_len: int) -> bool:
+    """Process pools deadlock inside active Spark/Python workers (fork + JVM threads)."""
+    override = os.environ.get("GLUONTS_ROTBAUM_PREPROCESS_WORKERS")
+    if override is not None:
+        return int(override) > 0
+    try:
+        from pyspark import SparkContext
+
+        if SparkContext._active_spark_context is not None:
+            return False
+    except Exception:
+        pass
+    return ts_list_len > 1
 
 
 class PreprocessOnlyLagFeaturesNoStats(PreprocessOnlyLagFeatures):
@@ -236,17 +252,29 @@ class PreprocessOnlyLagFeaturesNoStats(PreprocessOnlyLagFeatures):
 
         self.infer_feature_characteristics(ts_list[0])
 
-        with concurrent.futures.ProcessPoolExecutor() as executor:
-            logger.info("using concurrent data preprocessing (no-stats per-h)")
-            for result in executor.map(
-                _preprocess_no_stats_ts_worker,
-                [(self, ts) for ts in ts_list],
-            ):
-                ts_rows_per_h, ts_target_data = result
-                if len(ts_target_data) > 0 and len(ts_target_data[0]) > 0:
-                    for h in range(self.forecast_horizon):
-                        feature_data_per_h[h].extend(ts_rows_per_h[h])
-                    target_data.extend(ts_target_data)
+        use_parallel = _use_parallel_preprocess(len(ts_list))
+        if use_parallel:
+            with concurrent.futures.ProcessPoolExecutor() as executor:
+                logger.info(
+                    "using concurrent data preprocessing (no-stats per-h)"
+                )
+                results = executor.map(
+                    _preprocess_no_stats_ts_worker,
+                    [(self, ts) for ts in ts_list],
+                )
+        else:
+            logger.info(
+                "using sequential data preprocessing (no-stats per-h; Spark-safe)"
+            )
+            results = (
+                _preprocess_no_stats_ts_worker((self, ts)) for ts in ts_list
+            )
+        for result in results:
+            ts_rows_per_h, ts_target_data = result
+            if len(ts_target_data) > 0 and len(ts_target_data[0]) > 0:
+                for h in range(self.forecast_horizon):
+                    feature_data_per_h[h].extend(ts_rows_per_h[h])
+                target_data.extend(ts_target_data)
 
         logging.info(
             "Done preprocessing. Resulting number of datapoints is: {}".format(
