@@ -195,12 +195,12 @@ class TreePredictor(RepresentablePredictor):
             is not None
         )
 
-    def _last_row_indices_per_series(self, training_data) -> list[int]:
+    def _last_row_indices_per_series(self, training_data) -> List[int]:
         preprocess = self.preprocess_object
         context = preprocess.context_window_size
         pred_len = preprocess.forecast_horizon
         n_ignore = getattr(preprocess, "n_ignore_last", 0)
-        indices: list[int] = []
+        indices: List[int] = []
         offset = 0
         for ts in training_data:
             target_len = len(ts["target"]) - n_ignore
