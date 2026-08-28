@@ -53,11 +53,11 @@ class TreeEstimator(ThirdPartyEstimator):
         self,
         training_data: Dataset,
         validation_dataset=None,
-        append_predict_origin: bool = False,
+        replace_predict_origin: bool = False,
     ) -> Predictor:
         return self.predictor.train(
             training_data,
-            append_predict_origin_from=(
-                validation_dataset if append_predict_origin else None
+            replace_predict_origin_from=(
+                validation_dataset if replace_predict_origin else None
             ),
         )

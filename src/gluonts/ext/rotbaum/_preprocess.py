@@ -252,6 +252,8 @@ class PreprocessGeneric:
         Outputs a reasonable choice for number of windows to sample from each
         time series at training time.
         """
+        if getattr(self, "_use_all_windows_for_replace_origin", False):
+            return -1
         n_time_series = sum(
             len(time_series["target"])
             - self.context_window_size

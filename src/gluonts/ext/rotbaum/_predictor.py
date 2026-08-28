@@ -195,17 +195,32 @@ class TreePredictor(RepresentablePredictor):
             is not None
         )
 
-    def _append_predict_origin_rows(
-        self, append_predict_origin_from: Dataset
+    def _last_row_indices_per_series(self, training_data) -> list[int]:
+        preprocess = self.preprocess_object
+        context = preprocess.context_window_size
+        pred_len = preprocess.forecast_horizon
+        n_ignore = getattr(preprocess, "n_ignore_last", 0)
+        indices: list[int] = []
+        offset = 0
+        for ts in training_data:
+            target_len = len(ts["target"]) - n_ignore
+            n_windows = max(0, target_len - context - pred_len + 1)
+            if n_windows > 0:
+                indices.append(offset + n_windows - 1)
+            offset += n_windows
+        return indices
+
+    def _replace_predict_origin_rows(
+        self, replace_predict_origin_from: Dataset, training_data
     ) -> None:
         """
-        Append predict-origin rows from test-shaped series, repeated to match
-        the historical sliding-window count so LightGBM can learn identity.
+        Overwrite each series' last train row with predict-origin features and
+        holdout labels (1-for-1 replacement; no append or repeat).
         """
         preprocess = self.preprocess_object
         if not self._uses_per_horizon_feat_dynamic_real(preprocess):
             logger.warning(
-                "append_predict_origin requires per-horizon feat_dynamic_real; "
+                "replace_predict_origin requires per-horizon feat_dynamic_real; "
                 "skipping."
             )
             return
@@ -214,50 +229,40 @@ class TreePredictor(RepresentablePredictor):
         pred_len = preprocess.forecast_horizon
         feature_data_per_h = preprocess.feature_data_per_horizon
         target_data = preprocess.target_data
-        n_windows_before = len(target_data)
-        origin_blocks: list[tuple[list, list]] = []
+        last_indices = self._last_row_indices_per_series(training_data)
+        test_series = list(replace_predict_origin_from)
 
-        for test_ts in append_predict_origin_from:
+        if len(test_series) != len(last_indices):
+            logger.warning(
+                "[Rotbaum] replace_predict_origin: validation series count "
+                "(%s) != training series count (%s); pairing by zip min",
+                len(test_series),
+                len(last_indices),
+            )
+
+        n_replaced = 0
+        for test_ts, row_idx in zip(test_series, last_indices):
             target = np.asarray(test_ts["target"], dtype=float)
             if len(target) < context + pred_len:
                 continue
             predict_start = len(target) - context
             origin_targets = target[-pred_len:].tolist()
-            origin_rows = [
-                preprocess.make_features(test_ts, predict_start, h)
-                for h in range(pred_len)
-            ]
-            origin_blocks.append((origin_rows, origin_targets))
+            for h in range(pred_len):
+                feature_data_per_h[h][row_idx] = preprocess.make_features(
+                    test_ts, predict_start, h
+                )
+            target_data[row_idx] = origin_targets
+            n_replaced += 1
 
-        if not origin_blocks:
+        if n_replaced == 0:
             logger.warning(
-                "[Rotbaum] append_predict_origin: no valid series; skipping"
+                "[Rotbaum] replace_predict_origin: no valid series; skipping"
             )
             return
 
-        for origin_rows, origin_targets in origin_blocks:
-            for h in range(pred_len):
-                feature_data_per_h[h].append(origin_rows[h])
-            target_data.append(origin_targets)
-
-        n_origin = len(origin_blocks)
-        repeat_each = max(1, n_windows_before // n_origin)
-        origin_start = n_windows_before
-        for block_offset in range(n_origin):
-            block_idx = origin_start + block_offset
-            origin_target_vec = target_data[block_idx]
-            origin_rows = [feature_data_per_h[h][block_idx] for h in range(pred_len)]
-            for _ in range(repeat_each - 1):
-                for h in range(pred_len):
-                    feature_data_per_h[h].append(origin_rows[h])
-                target_data.append(origin_target_vec)
-
         logger.info(
-            "[Rotbaum] appended predict-origin rows: %s series, repeat_each=%s "
-            "(historical_windows=%s, total_rows=%s)",
-            n_origin,
-            repeat_each,
-            n_windows_before,
+            "[Rotbaum] replaced predict-origin rows: %s series (total_rows=%s)",
+            n_replaced,
             len(target_data),
         )
 
@@ -267,7 +272,7 @@ class TreePredictor(RepresentablePredictor):
         train_QRX_only_using_timestep: int = -1,  # If not -1 and self.method
         # == 'QRX', this will use only the train_QRX_only_using_timestep^th
         # timestep in the forecast horizon to create the partition.
-        append_predict_origin_from: Optional[Dataset] = None,
+        replace_predict_origin_from: Optional[Dataset] = None,
     ):
         assert training_data
         # Debugging aid: log the exact feature layout being fed to LightGBM.
@@ -311,11 +316,16 @@ class TreePredictor(RepresentablePredictor):
         assert self.freq is not None
         if first(training_data)["start"].freq is not None:
             assert self.freq == next(iter(training_data))["start"].freq
+        if replace_predict_origin_from is not None:
+            self.preprocess_object._use_all_windows_for_replace_origin = True
         self.preprocess_object.preprocess_from_list(
             ts_list=list(training_data), change_internal_variables=True
         )
-        if append_predict_origin_from is not None:
-            self._append_predict_origin_rows(append_predict_origin_from)
+        if replace_predict_origin_from is not None:
+            self._replace_predict_origin_rows(
+                replace_predict_origin_from, training_data
+            )
+            self.preprocess_object._use_all_windows_for_replace_origin = False
         target_data = self.preprocess_object.target_data
         per_h = self._uses_per_horizon_feat_dynamic_real(
             self.preprocess_object
