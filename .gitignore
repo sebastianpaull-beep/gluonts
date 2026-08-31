@@ -167,3 +167,6 @@ src/gluonts/version.py
 Makefile.own
 
 lightning_logs/
+.claude
+.cursor
+.mcp.json
