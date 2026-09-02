@@ -29,6 +29,7 @@ class MyFeedForwardNetworkBase(mx.gluon.HybridBlock):
         num_cells: int,
         context_length: int,
         num_feat_dynamic_real: int = 0,
+        output_activation: str = "softrelu",
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -39,6 +40,9 @@ class MyFeedForwardNetworkBase(mx.gluon.HybridBlock):
         self.num_feat_dynamic_real = num_feat_dynamic_real
         self.flat_dim = context_length + num_feat_dynamic_real * (
             context_length + prediction_length
+        )
+        self._output_activation = (
+            None if output_activation == "identity" else output_activation
         )
 
         with self.name_scope():
@@ -51,7 +55,8 @@ class MyFeedForwardNetworkBase(mx.gluon.HybridBlock):
             )
             self.nn.add(
                 mx.gluon.nn.Dense(
-                    units=self.prediction_length, activation="softrelu"
+                    units=self.prediction_length,
+                    activation=self._output_activation,
                 )
             )
 
@@ -73,6 +78,12 @@ class MyFeedForwardNetworkBase(mx.gluon.HybridBlock):
 
 
 class MyFeedForwardTrainNetwork(MyFeedForwardNetworkBase):
+    def __init__(self, loss: str = "mae", **kwargs):
+        super().__init__(**kwargs)
+        if loss not in ("mae", "mse"):
+            raise ValueError(f"Unsupported loss: {loss}")
+        self._loss = loss
+
     def hybrid_forward(
         self,
         F,
@@ -85,7 +96,10 @@ class MyFeedForwardTrainNetwork(MyFeedForwardNetworkBase):
             F, past_target, past_feat_dynamic_real, future_feat_dynamic_real
         )
         prediction = self.nn(mlp_in)
-        return (prediction - future_target).abs().mean(axis=-1)
+        err = prediction - future_target
+        if self._loss == "mse":
+            return (err * err).mean(axis=-1)
+        return err.abs().mean(axis=-1)
 
 
 class MyFeedForwardPredNetwork(MyFeedForwardNetworkBase):

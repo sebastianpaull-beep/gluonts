@@ -48,6 +48,8 @@ class MyFeedForwardEstimator(GluonEstimator):
         batch_size: int = 32,
         trainer: Trainer = Trainer(),
         num_feat_dynamic_real: int = 0,
+        output_activation: str = "softrelu",
+        loss: str = "mae",
     ) -> None:
         super().__init__(trainer=trainer, batch_size=batch_size)
         assert num_feat_dynamic_real >= 0
@@ -55,6 +57,8 @@ class MyFeedForwardEstimator(GluonEstimator):
         self.context_length = context_length
         self.num_cells = num_cells
         self.num_feat_dynamic_real = num_feat_dynamic_real
+        self.output_activation = output_activation
+        self.loss = loss
 
     def _training_input_names(self):
         names = ["past_target", "future_target"]
@@ -109,6 +113,8 @@ class MyFeedForwardEstimator(GluonEstimator):
             num_cells=self.num_cells,
             context_length=self.context_length,
             num_feat_dynamic_real=self.num_feat_dynamic_real,
+            output_activation=self.output_activation,
+            loss=self.loss,
         )
 
     def create_predictor(
@@ -134,6 +140,7 @@ class MyFeedForwardEstimator(GluonEstimator):
             num_cells=self.num_cells,
             context_length=self.context_length,
             num_feat_dynamic_real=self.num_feat_dynamic_real,
+            output_activation=self.output_activation,
         )
 
         copy_parameters(trained_network, prediction_network)
