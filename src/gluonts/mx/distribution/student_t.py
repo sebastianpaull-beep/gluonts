@@ -24,9 +24,24 @@ from .distribution import (
     _sample_multiple,
     getF,
     nans_like,
-    softplus,
 )
-from .distribution_output import DistributionOutput
+from .distribution_output import (
+    DistributionOutput,
+    interval_bounded,
+    lower_bounded,
+)
+
+# Bounding the degrees of freedom away from the heavy-tail regime keeps the
+# mean (needs nu > 1) and the standard deviation (needs nu > 2) defined, and
+# keeps sample paths from being dominated by extreme draws.
+NU_LOWER_BOUND = 5.0
+
+# sigma is the scale of the *unscaled* target, i.e. before the affine
+# transformation applied by `DistributionOutput.distribution`. The lower bound
+# avoids a degenerate likelihood, the upper bound keeps the scale on the order
+# of the normalised target.
+SIGMA_LOWER_BOUND = 1e-3
+SIGMA_UPPER_BOUND = 1.0
 
 
 class StudentT(Distribution):
@@ -123,13 +138,29 @@ class StudentT(Distribution):
 
 
 class StudentTOutput(DistributionOutput):
+    """
+    Student's t output whose scale and degrees of freedom have a bounded
+    domain.
+
+    ``mu`` stays unconstrained, ``sigma`` is mapped into
+    ``(SIGMA_LOWER_BOUND, SIGMA_UPPER_BOUND)`` by `interval_bounded` and
+    ``nu`` into ``(NU_LOWER_BOUND, inf)`` by `lower_bounded`. Both intervals
+    are open in exact arithmetic only; see those functions for the behaviour
+    at the endpoints in floating point.
+    """
+
     args_dim: Dict[str, int] = {"mu": 1, "sigma": 1, "nu": 1}
     distr_cls: type = StudentT
 
     @classmethod
     def domain_map(cls, F, mu, sigma, nu):
-        sigma = F.maximum(softplus(F, sigma), cls.eps())
-        nu = 2.0 + F.maximum(softplus(F, nu), cls.eps())
+        sigma = interval_bounded(
+            F,
+            sigma,
+            lower_bound=SIGMA_LOWER_BOUND,
+            upper_bound=SIGMA_UPPER_BOUND,
+        )
+        nu = lower_bounded(F, nu, lower_bound=NU_LOWER_BOUND)
         return mu.squeeze(axis=-1), sigma.squeeze(axis=-1), nu.squeeze(axis=-1)
 
     @property

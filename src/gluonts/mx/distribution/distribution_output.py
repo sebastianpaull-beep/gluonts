@@ -19,8 +19,44 @@ from mxnet import gluon
 from gluonts.core.component import validated
 from gluonts.mx import Tensor
 
-from .distribution import Distribution
+from .distribution import Distribution, softplus
 from .transformed_distribution import AffineTransformedDistribution
+
+
+def lower_bounded(F, x: Tensor, lower_bound: float) -> Tensor:
+    """
+    Map a raw network parameter to ``(lower_bound, inf)`` via
+    ``lower_bound + softplus(x)``.
+
+    The map is smooth and strictly increasing, so the bound holds for every
+    finite ``x`` and gradients stay finite (they vanish as ``x`` decreases).
+    The interval is open in exact arithmetic only: in floating point
+    ``softplus`` underflows, so ``lower_bound`` itself is returned once ``x``
+    is sufficiently negative.
+
+    Only scalar arithmetic is combined with MXNet operators, which preserves
+    the dtype of ``x`` and works both in ``mx.nd`` and in ``mx.sym``
+    (hybridised) mode.
+    """
+    return lower_bound + softplus(F, x)
+
+
+def interval_bounded(
+    F, x: Tensor, lower_bound: float, upper_bound: float
+) -> Tensor:
+    """
+    Map a raw network parameter to ``(lower_bound, upper_bound)`` via a
+    sigmoid rescaled to that interval.
+
+    Either endpoint is approached only asymptotically, so the bounds hold for
+    every finite ``x`` and gradients stay finite. As for `lower_bounded`, the
+    interval is open in exact arithmetic only: in floating point ``sigmoid``
+    saturates, so ``lower_bound`` is returned for sufficiently negative ``x``
+    and ``upper_bound`` -- up to the rounding of the rescaling -- for
+    sufficiently large ``x``. Same dtype and hybridisation properties as
+    `lower_bounded`.
+    """
+    return lower_bound + (upper_bound - lower_bound) * F.sigmoid(x)
 
 
 class ArgProj(gluon.HybridBlock):

@@ -78,6 +78,11 @@ from gluonts.mx.distribution.box_cox_transform import (
     InverseBoxCoxTransform,
     InverseBoxCoxTransformOutput,
 )
+from gluonts.mx.distribution.student_t import (
+    NU_LOWER_BOUND,
+    SIGMA_LOWER_BOUND,
+    SIGMA_UPPER_BOUND,
+)
 from gluonts.mx.distribution.transformed_distribution import (
     TransformedDistribution,
 )
@@ -98,6 +103,15 @@ mx.random.seed(1)
 def inv_softplus(y: np.ndarray) -> np.ndarray:
     # y = log(1 + exp(x))  ==>  x = log(exp(y) - 1)
     return np.log(np.exp(y) - 1)
+
+
+def inv_scaled_sigmoid(
+    y: np.ndarray, lower_bound: float, upper_bound: float
+) -> np.ndarray:
+    # y = lower_bound + (upper_bound - lower_bound) / (1 + exp(-x))
+    #   ==>  x = log(z / (1 - z)),  z = (y - lower_bound) / (upper - lower)
+    z = (y - lower_bound) / (upper_bound - lower_bound)
+    return np.log(z / (1 - z))
 
 
 def maximum_likelihood_estimate_sgd(
@@ -327,11 +341,16 @@ def test_studentT_likelihood(
     samples = distr.sample()
 
     # nu takes very long to learn, so we initialize it at the true value.
-    # transform used is softplus(x) + 2
+    # transforms used are softplus(x) + NU_LOWER_BOUND for nu, and a sigmoid
+    # rescaled to [SIGMA_LOWER_BOUND, SIGMA_UPPER_BOUND] for sigma
     init_bias = [
         mu - START_TOL_MULTIPLE * TOL * mu,
-        inv_softplus(sigma - START_TOL_MULTIPLE * TOL * sigma),
-        inv_softplus(nu - 2),
+        inv_scaled_sigmoid(
+            sigma - START_TOL_MULTIPLE * TOL * sigma,
+            lower_bound=SIGMA_LOWER_BOUND,
+            upper_bound=SIGMA_UPPER_BOUND,
+        ),
+        inv_softplus(nu - NU_LOWER_BOUND),
     ]
 
     mu_hat, sigma_hat, nu_hat = maximum_likelihood_estimate_sgd(
