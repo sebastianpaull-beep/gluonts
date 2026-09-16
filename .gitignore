@@ -170,3 +170,4 @@ lightning_logs/
 .claude
 .cursor
 .mcp.json
+*.code-workspace
