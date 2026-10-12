@@ -449,49 +449,70 @@ class TreePredictor(RepresentablePredictor):
                 for i in range(n_models)
             ]
             target_data = np.array(target_data)
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=self.max_workers
-            ) as executor:
-                for n_step, model in enumerate(self.model_list):
-                    current_target_data = target_data[:, n_step]
-                    indices = ~np.isnan(current_target_data)
-                    assert sum(indices), (
-                        f"in timestamp {n_step} all values "
-                        f"in train were nan"
+
+            def _fit_horizon_step(n_step, model, model_is_already_trained=False):
+                current_target_data = target_data[:, n_step]
+                indices = ~np.isnan(current_target_data)
+                assert sum(indices), (
+                    f"in timestamp {n_step} all values in train were nan"
+                )
+                if n_step != train_QRX_only_using_timestep:
+                    logger.info(
+                        f"Training model for step no. {n_step + 1} in the "
+                        "forecast horizon"
                     )
-                    if n_step != train_QRX_only_using_timestep:
-                        logger.info(
-                            f"Training model for step no. {n_step + 1} in the "
-                            "forecast"
-                            " horizon"
-                        )
-                        executor.submit(
-                            model.fit,
-                            list(compress(rows_for_step(n_step), indices)),
-                            current_target_data[indices],
-                            model_is_already_trained=True,
-                        )
+                model.fit(
+                    list(compress(rows_for_step(n_step), indices)),
+                    current_target_data[indices],
+                    model_is_already_trained=model_is_already_trained,
+                )
+
+            if self.max_workers == 1:
+                for n_step, model in enumerate(self.model_list):
+                    if n_step == train_QRX_only_using_timestep:
+                        continue
+                    _fit_horizon_step(
+                        n_step, model, model_is_already_trained=True
+                    )
+            else:
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=self.max_workers
+                ) as executor:
+                    for n_step, model in enumerate(self.model_list):
+                        if n_step != train_QRX_only_using_timestep:
+                            executor.submit(
+                                _fit_horizon_step,
+                                n_step,
+                                model,
+                                True,
+                            )
         else:
             target_data = np.array(target_data)
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=self.max_workers
-            ) as executor:
+
+            def _fit_horizon_step(n_step, model):
+                current_target_data = target_data[:, n_step]
+                indices = ~np.isnan(current_target_data)
+                assert sum(indices), (
+                    f"in timestamp {n_step} all values in train were nan"
+                )
+                logger.info(
+                    f"Training model for step no. {n_step + 1} in the"
+                    " forecast horizon"
+                )
+                model.fit(
+                    list(compress(rows_for_step(n_step), indices)),
+                    current_target_data[indices],
+                )
+
+            if self.max_workers == 1:
                 for n_step, model in enumerate(self.model_list):
-                    current_target_data = target_data[:, n_step]
-                    indices = ~np.isnan(current_target_data)
-                    assert sum(indices), (
-                        f"in timestamp {n_step} all values "
-                        f"in train were nan"
-                    )
-                    logger.info(
-                        f"Training model for step no. {n_step + 1} in the"
-                        " forecast horizon"
-                    )
-                    executor.submit(
-                        model.fit,
-                        list(compress(rows_for_step(n_step), indices)),
-                        current_target_data[indices],
-                    )
+                    _fit_horizon_step(n_step, model)
+            else:
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=self.max_workers
+                ) as executor:
+                    for n_step, model in enumerate(self.model_list):
+                        executor.submit(_fit_horizon_step, n_step, model)
         return self
 
     def predict(
