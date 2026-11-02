@@ -180,3 +180,4 @@ gluonts-*.code-workspace
 
 # Handoff: worktree copy-list artefacts (managed by sync-targets)
 .envrc
+.agents
